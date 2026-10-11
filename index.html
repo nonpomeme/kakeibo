@@ -241,6 +241,12 @@ input.field{width:100%;border:0;background:var(--soft);border-radius:14px;paddin
 .amtbox span{font-family:var(--display);font-weight:700;font-size:28px;color:var(--ink2)}
 .amtbox input{flex:1;min-width:0;border:0;background:none;font-family:var(--display);font-weight:800;font-stretch:76%;font-size:60px;line-height:1.05;letter-spacing:-.03em;padding:0;outline:none;font-variant-numeric:tabular-nums}
 .amtbox input::placeholder{color:var(--ink3)}
+.amtbox input.expr{font-size:36px;letter-spacing:-.01em}
+.calc{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:0 0 4px}
+.calc button{border:0;background:var(--surface);border-radius:12px;min-width:44px;height:40px;padding:0 10px;font-family:var(--display);font-weight:700;font-size:20px;color:var(--ink)}
+.calc button.eq{background:var(--ink);color:var(--bg)}
+.calc .res:empty{display:none}
+.calc .res{order:-1;flex-basis:100%;text-align:right;font-family:var(--display);font-weight:700;font-size:18px;color:var(--ink2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .lbl2{display:block;font-size:12px;font-weight:600;color:var(--ink2);margin:20px 0 8px}
 .cgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
 .cgrid button{border:0;background:var(--surface);border-radius:14px;padding:11px 8px;font-size:13px;font-weight:600;display:flex;align-items:center;justify-content:center;gap:6px}
@@ -384,7 +390,8 @@ input.field{width:100%;border:0;background:var(--soft);border-radius:14px;paddin
       <button class="ib" id="sheetClose" aria-label="閉じる"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
     </div>
     <h2 id="sheetTitle" class="eye" style="color:var(--ink2);margin:20px 0 0">New entry</h2>
-    <div class="amtbox"><span>¥</span><input id="fAmt" inputmode="numeric" autocomplete="off" placeholder="0" aria-label="金額"></div>
+    <div class="amtbox"><span>¥</span><input id="fAmt" inputmode="numeric" autocomplete="off" placeholder="0" aria-label="金額(計算式も入力できます)"></div>
+    <div class="calc" id="calcKeys"><button data-op="+" aria-label="足す">+</button><button data-op="−" aria-label="引く">−</button><button data-op="×" aria-label="掛ける">×</button><button data-op="÷" aria-label="割る">÷</button><button data-op="⌫" aria-label="1文字消す">⌫</button><button class="eq" data-op="=" aria-label="計算する">=</button><span class="res" id="calcRes" aria-live="polite"></span></div>
     <span class="lbl2">カテゴリー</span>
     <div class="cgrid" id="fCats"></div>
     <span class="lbl2">日付</span>
@@ -687,6 +694,8 @@ ${data}`;
 }
 
 /* ---------- 予算 ---------- */
+// 入力のたびに即保存する(iPhone の数字キーボードでは change が来ないことがあり、保存漏れの原因だった)
+function setBudget(c,v){if(v)state.budgets[c]=v;else delete state.budgets[c];saveLocal();$("budTot").textContent=yen(budTotal())}
 function renderBudget(){
   $("budTot").textContent=yen(budTotal());
   const ct=catTotals(cur);
@@ -696,8 +705,9 @@ function renderBudget(){
     host.append(el("div",{class:"brow"},
       el("div",{class:"top2"},el("span",{class:"name"},c,over?el("span",{class:"badge"},"OVER"):null),
         el("input",{inputmode:"numeric",value:b?comma(b):"",placeholder:"—","aria-label":`${c}の予算`,
-          oninput:e=>{const d=e.target.value.replace(/[^\d]/g,"");e.target.value=d?(+d).toLocaleString("ja-JP"):""},
-          onchange:e=>{const v=+(e.target.value.replace(/[^\d]/g,""))||0;if(v)state.budgets[c]=v;else delete state.budgets[c];saveLocal();renderAll()}})),
+          oninput:e=>{const d=e.target.value.replace(/[^\d]/g,"").slice(0,9);e.target.value=d?(+d).toLocaleString("ja-JP"):"";setBudget(c,+d||0)},
+          onblur:()=>setTimeout(()=>{if(!document.activeElement?.closest?.("#v-budget .brow"))renderBudget()},0), // 別の予算欄へ移る途中は描き直さない
+          onkeydown:e=>{if(e.key==="Enter")e.target.blur()}})),
       el("div",{class:"info"},el("span",{},`${ymLabel(cur)} ${yen(s)}`),el("span",{class:over?"up":false},b?(over?`${yen(s-b)} オーバー`:`残り ${yen(b-s)}`):"予算なし")),
       b?el("div",{class:"bar"},el("i",{style:`width:${Math.min(100,r*100)}%;background:${over?"var(--danger)":"var(--ink)"}`})):null))})};
   grp($("budRows"),fixedCats(),"Fixed","固定費");
@@ -740,6 +750,43 @@ function importData(f){
   r.readAsText(f);
 }
 
+/* ---------- 金額の計算(1,000+2,000 など) ---------- */
+const OPS="+−×÷";
+// 入力を「数字・演算子」だけに整え、数字は3桁カンマ区切りにする
+function fmtExpr(v){
+  v=v.normalize("NFKC").replace(/[*xX]/g,"×").replace(/\//g,"÷").replace(/-/g,"−").replace(/[^\d+−×÷]/g,"");
+  v=v.replace(/^[+×÷]+/,"").replace(/([+−×÷])[+−×÷]+/g,(_,a)=>a); // 先頭の記号・記号の連続は1つに
+  return v.replace(/\d+/g,d=>{d=d.replace(/^0+(?=\d)/,"").slice(0,9);return(+d).toLocaleString("ja-JP")});
+}
+// 計算式を評価(× ÷ を先に計算)。不正なら NaN
+function calcExpr(v){
+  const t=v.replace(/,/g,"").match(/\d+|[+−×÷]/g);if(!t)return NaN;
+  if(/[+−×÷]/.test(t[t.length-1]))t.pop();
+  let sum=0,term=null,sign=1,op=null;
+  for(const x of t){
+    if(OPS.includes(x)){if(x==="+"||x==="−"){if(term==null)return NaN;sum+=sign*term;term=null;sign=x==="+"?1:-1;op=null}else{if(term==null)return NaN;op=x}continue}
+    const n=+x;
+    if(op==="×")term*=n;else if(op==="÷")term=n?term/n:NaN;else if(term==null)term=n;else return NaN;
+    op=null;
+  }
+  if(term==null)return NaN;
+  return Math.round(sum+sign*term);
+}
+const hasOp=v=>/\d[+−×÷]/.test(v);
+function amtVal(){const v=$("fAmt").value;return hasOp(v)?calcExpr(v):+(v.replace(/[^\d]/g,""))}
+function updCalc(){
+  const v=$("fAmt").value,ex=hasOp(v),r=ex?calcExpr(v):NaN;
+  $("fAmt").classList.toggle("expr",ex);
+  $("calcRes").textContent=ex?(isNaN(r)?"":"= "+yen(r)):"";
+}
+function calcKey(op){
+  const inp=$("fAmt");
+  if(op==="="){const r=calcExpr(inp.value);if(!isNaN(r))inp.value=r>0?comma(r):""}
+  else if(op==="⌫")inp.value=fmtExpr(inp.value.slice(0,-1));
+  else inp.value=fmtExpr(inp.value+op);
+  updCalc();
+}
+
 /* ---------- 入力シート ---------- */
 function renderSheet(){
   document.querySelectorAll("#typeSeg button").forEach(b=>b.setAttribute("aria-pressed",String(b.dataset.ty===fType)));
@@ -751,8 +798,8 @@ function renderSheet(){
 function openSheet(e){
   const now=new Date();
   if(e){editing={id:e.id,ym:e.date.slice(0,7)};fType=isIn(e)?"in":"out";fCat=e.cat;fTagSet=new Set(e.tags||[]);
-    $("fAmt").value=comma(e.amount);$("fDate").value=e.date;$("fMemo").value=e.memo||"";$("sheetTitle").textContent="Edit entry";$("fSave").textContent="更新する";$("delWrap").hidden=false}
-  else{editing=null;fType="out";fTagSet=new Set();$("fAmt").value="";$("fMemo").value="";$("fDate").value=ymOf(now)===cur?ymdOf(now):cur+"-01";
+    $("fAmt").value=comma(e.amount);updCalc();$("fDate").value=e.date;$("fMemo").value=e.memo||"";$("sheetTitle").textContent="Edit entry";$("fSave").textContent="更新する";$("delWrap").hidden=false}
+  else{editing=null;fType="out";fTagSet=new Set();$("fAmt").value="";updCalc();$("fMemo").value="";$("fDate").value=ymOf(now)===cur?ymdOf(now):cur+"-01";
     $("sheetTitle").textContent="New entry";$("fSave").textContent="記録する";$("delWrap").hidden=true}
   renderSheet();
   const s=$("sheet");s.classList.add("open");s.setAttribute("aria-hidden","false");document.body.style.overflow="hidden";
@@ -760,9 +807,10 @@ function openSheet(e){
 }
 function closeSheet(){const s=$("sheet");s.classList.remove("open");s.setAttribute("aria-hidden","true");document.body.style.overflow="";$("fAmt").blur()}
 function saveEntry(){
-  const date=$("fDate").value,amount=+($("fAmt").value.replace(/[^\d]/g,""));
+  const date=$("fDate").value,amount=amtVal();
   if(!date){toast("日付を入れてください");return}
-  if(!(amount>0)){toast("金額を入れてください");$("fAmt").focus();return}
+  if(isNaN(amount)){toast("計算式を確認してください");$("fAmt").focus();return}
+  if(!(amount>0)){toast(hasOp($("fAmt").value)?"計算結果が0円以下です":"金額を入れてください");$("fAmt").focus();return}
   const ym=date.slice(0,7),wasEdit=!!editing;
   const entry={id:editing?editing.id:newId(),date,cat:fCat,amount,memo:$("fMemo").value.trim(),tags:fType==="in"?[]:[...fTagSet]};
   if(fType==="in")entry.type="in";
@@ -791,7 +839,12 @@ $("nextM").onclick=()=>{cur=addM(cur,1);showAll=false;renderAll()};
 $("fab").onclick=()=>openSheet(null);
 $("sheetBd").onclick=closeSheet;$("sheetClose").onclick=closeSheet;
 document.addEventListener("keydown",e=>{if(e.key==="Escape"&&$("sheet").classList.contains("open"))closeSheet()});
-$("fAmt").addEventListener("input",e=>{const d=e.target.value.replace(/[^\d]/g,"").slice(0,9);e.target.value=d?(+d).toLocaleString("ja-JP"):""});
+$("fAmt").addEventListener("input",e=>{e.target.value=fmtExpr(e.target.value);updCalc()});
+// 計算キー:押してもキーボードが閉じないようにフォーカスを入力欄に残す
+document.querySelectorAll("#calcKeys button").forEach(b=>{
+  b.addEventListener("mousedown",e=>e.preventDefault());
+  b.addEventListener("click",()=>{calcKey(b.dataset.op);$("fAmt").focus()});
+});
 $("fAmt").addEventListener("keydown",e=>{if(e.key==="Enter")saveEntry()});
 $("fSave").onclick=saveEntry;$("fDel").onclick=delEntry;
 function mkAdd(inp,toForm){const n=addTag($(inp).value);if(n){$(inp).value="";if(toForm){fTagSet.add(n);renderSheet()}else renderSettings();toast(`#${n} を作成しました`)}}
