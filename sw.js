@@ -1,5 +1,5 @@
 // オフライン対応。ネットにつながっていれば常に最新版を取りに行き、つながらなければ保存しておいた版を使う。
-const VERSION = "kakeibo-v4";
+const VERSION = "kakeibo-v5";
 const FILES = ["./", "index.html", "manifest.json", "icon-180.png", "icon-192.png", "icon-512.png"];
 self.addEventListener("install", e => {
   e.waitUntil(caches.open(VERSION).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));
